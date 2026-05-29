@@ -17,6 +17,7 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
+from typing import BinaryIO
 import anthropic
 
 # ---------------------------------------------------------------------------
@@ -127,20 +128,25 @@ def derive_output_filename(pdf_path: Path) -> str:
 def upload_pdf(client: anthropic.Anthropic, pdf_path: Path) -> str:
     print(f"Uploading {pdf_path.name} to Files API...")
     with open(pdf_path, "rb") as f:
-        result = client.beta.files.upload(
-            file=(pdf_path.name, f, "application/pdf"),
-        )
-    file_id = result.id
+        file_id = upload_pdf_fileobj(client, pdf_path.name, f)
     print(f"  Uploaded. file_id={file_id}")
     return file_id
 
 
-def build_user_message(pdf_path: Path, file_id: str) -> list:
+def upload_pdf_fileobj(client: anthropic.Anthropic, filename: str, fileobj: BinaryIO) -> str:
+    """Upload PDF content from an open binary stream and return the file_id."""
+    result = client.beta.files.upload(
+        file=(filename, fileobj, "application/pdf"),
+    )
+    return result.id
+
+
+def build_user_message(filename: str, file_id: str) -> list:
     return [
         {
             "type": "text",
             "text": (
-                f"Please summarize the attached financial report '{pdf_path.name}'. "
+                f"Please summarize the attached financial report '{filename}'. "
                 "Follow the exact output structure specified in your instructions. "
                 "Use only the data present in the document."
             ),
@@ -152,10 +158,9 @@ def build_user_message(pdf_path: Path, file_id: str) -> list:
     ]
 
 
-def generate_summary(client: anthropic.Anthropic, pdf_path: Path, file_id: str) -> str:
-    print("Generating summary (streaming)...")
+def summarize_file_id(client: anthropic.Anthropic, filename: str, file_id: str) -> str:
+    """Generate the Markdown summary for an already-uploaded file (no console output)."""
     chunks = []
-
     with client.beta.messages.stream(
         model="claude-opus-4-8",
         max_tokens=4096,
@@ -164,17 +169,21 @@ def generate_summary(client: anthropic.Anthropic, pdf_path: Path, file_id: str) 
         messages=[
             {
                 "role": "user",
-                "content": build_user_message(pdf_path, file_id),
+                "content": build_user_message(filename, file_id),
             }
         ],
         betas=["files-api-2025-04-14"],
     ) as stream:
         for text in stream.text_stream:
-            print(text, end="", flush=True)
             chunks.append(text)
-
-    print()  # newline after streaming
     return "".join(chunks)
+
+
+def generate_summary(client: anthropic.Anthropic, pdf_path: Path, file_id: str) -> str:
+    print("Generating summary (streaming)...")
+    summary = summarize_file_id(client, pdf_path.name, file_id)
+    print(summary)
+    return summary
 
 
 def save_output(content: str, out_dir: Path, filename: str) -> Path:
