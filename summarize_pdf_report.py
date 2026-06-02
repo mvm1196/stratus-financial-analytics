@@ -1,15 +1,20 @@
 """
 summarize_pdf_report.py
 
-Reads a PDF board/financial report, sends it to Claude via the Anthropic Files API,
-and generates a structured Markdown summary following the Jarvis meeting/document
-output conventions defined in CLAUDE.md.
+Reads one or more board-level financial report PDFs (P&L, Balance Sheet, etc.),
+uploads them to Claude via the Anthropic Files API, and generates a structured
+analytical Markdown summary.
 
 Usage:
-    python summarize_pdf_report.py [PDF_PATH] [OUTPUT_PATH]
+    # Pass a directory — all PDFs in the folder are processed together
+    python summarize_pdf_report.py "/path/to/folder"
 
-    PDF_PATH defaults to the Apr 2026 P&L vs 2025 report.
-    OUTPUT_PATH defaults to the _Unfiled folder in the Jarvis vault.
+    # Pass one or more explicit file paths
+    python summarize_pdf_report.py file1.pdf file2.pdf file3.pdf
+
+    # Optional: add output directory as the last argument (must end in / or be an
+    # existing directory that contains no .pdf extension)
+    python summarize_pdf_report.py "/path/to/folder" "/path/to/output/"
 """
 
 import sys
@@ -24,83 +29,158 @@ import anthropic
 # CONFIG
 # ---------------------------------------------------------------------------
 
-DEFAULT_PDF = r"/mnt/h/My Drive/WCGC/Board Reports/2026/04 - May 2026/Apr 2026 P&L vs 2025.pdf"
+DEFAULT_INPUT = r"/mnt/h/My Drive/WCGC/Board Reports/2026/04 - May 2026"
 DEFAULT_OUTPUT_DIR = r"/mnt/g/My Drive/AI/Jarvis/30 - Meetings/_Unfiled"
 
-SYSTEM_PROMPT = """You are a financial document assistant. Your job is to read board-level \
-financial reports and produce a clean, structured Markdown summary suitable for an \
-executive audience with no accounting background.
-
-Rules:
-- Write for a non-technical executive audience - clear, concise, no jargon
-- Do not infer or speculate - only document what is explicitly stated in the document
-- Mark anything still being determined as TBD
-- Label scope numbers as estimates if they are presented as such
-- Do not use M-dashes (—) inside body content. Use hyphens (-) or colons (:) instead
-- Bullets should be tight - one idea per bullet
-- No filler language or throat-clearing
-- Numbers: include $ and relevant units; use "vs" for comparisons; round to nearest dollar
-- If a line item is favorable vs prior year, note "(favorable)"; if unfavorable, note "(unfavorable)"
-
-Output the summary using EXACTLY this Markdown structure (no deviations):
+SYSTEM_PROMPT = """You are a financial analyst producing board-level financial summaries \
+for nonprofit organizations. You will receive one or more financial report PDFs for the \
+same organization and reporting period. Produce a single unified summary.
 
 ---
-date: YYYY-MM-DD
-project: [Organization Name]
-type: financial-report
-tags: [financial-report, board, pl]
+
+ANALYTICAL STYLE REQUIREMENTS
+
+- Write for a non-technical board audience - clear, direct, no jargon
+- Every significant variance must include: dollar amount, percentage change vs prior year, \
+and one sentence of analytical context (what likely drove it, or why it warrants attention)
+- Express dollar variances in $K (e.g. $8.4K, -$2.0K). Use + for favorable, - for unfavorable
+- Use "vs PY" for prior year comparisons
+- Flag items that "warrant monitoring" or "merit review" when there is a meaningful trend or risk
+- Do not speculate beyond what the data supports - use "likely", "may reflect", or "timing" \
+language when the cause is inferred rather than stated
+- Bullets should be tight - one item per bullet
+- Do not use M-dashes in body text. Use hyphens (-) or colons (:) instead
+- No filler language
+
 ---
 
-# YYYY-MM-DD - [Organization] - [Report Title]
+OUTPUT STRUCTURE
 
-## Report Period
-[Month/period covered, e.g. "April 2026 vs April 2025"]
+Use exactly this structure. Omit any section for which no source document was provided.
 
-## Summary
-One or two sentences on what this report covers and the overall financial position.
+[Organization Name] - Financial Summary
+As of [Reporting Date]
 
-## Revenue
-- [Line item]: $X (vs $Y prior year) - (favorable/unfavorable)
+## Section 1: FY[YY] vs FY[YY] Actuals ([Month Range] YTD)
+[One opening sentence: headline Gross Profit or Net Income result and primary driver]
+
+**Income** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [Line item]: [+/-$X.XK / +/-X.X%] - [one-line context]
 - ...
 
-## Expenses
-- [Line item]: $X (vs $Y prior year) - (favorable/unfavorable)
+**COGS** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [Line item]: [+/-$X.XK / +/-X.X%] - [one-line context]
 - ...
 
-## Net Income / Loss
-- [Period]: $X (vs $Y prior year) - (favorable/unfavorable)
-- YTD: $X (vs $Y prior year) - (favorable/unfavorable)
+**Expenses** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [Category]: [+/-$X.XK / +/-X.X%] - [one-line context]
+  - [Sub-item driving the variance, if material]
+- ...
 
-## Key Variances
-- [Most significant items driving the difference from prior year]
+**YTD Closing Line:** [One sentence bottom-line summary tying the drivers together]
 
-## Notable Items
-- [Anything flagged, one-time, or worth calling out]
+---
 
-## Open Items / TBDs
-- [Any items marked TBD or requiring follow-up - write "None." if nothing flagged]
+## Section 2: Current Month Actuals ([Month Year] vs [Month Year])
+[One opening sentence: headline Gross Profit or Net Income result and primary driver]
+
+**Income** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [same structure as Section 1]
+
+**COGS** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [same structure]
+
+**Expenses** - $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [same structure]
+
+**Month Closing Line:** [One sentence bottom-line summary]
+
+---
+
+## Section 3: Financial Position (Balance Sheet - [Date])
+[One opening sentence: overall balance sheet health and direction vs PY]
+
+**Assets** - Total Assets $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [Category]: $[total], [+/-$X.XK vs PY] - [context]
+  - [Material sub-items]
+- ...
+
+**Liabilities** - Total Liabilities $[total] ([+/-$X.XK / +/-X.X%] vs PY)
+- [same structure]
+
+**Equity** - Total Equity $[total] ([+/-$X.XK vs PY])
+- [Key equity line items]
+
+---
+
+## Section 4: Summary
+[4-6 standalone paragraphs, one per major theme. Each paragraph: bold topic label, \
+then 2-4 sentences of narrative. Cover: revenue trend, COGS/margin, expense discipline, \
+net income position, balance sheet health. Call out any watch items or anomalies.]
+
+**[Topic].** [Narrative.]
+
+**[Topic].** [Narrative.]
 """
 
 # ---------------------------------------------------------------------------
-# HELPERS
+# INPUT RESOLUTION
 # ---------------------------------------------------------------------------
 
 
-def resolve_paths(argv):
-    pdf_path = Path(argv[1]) if len(argv) > 1 else Path(DEFAULT_PDF)
-    out_dir = Path(argv[2]) if len(argv) > 2 else Path(DEFAULT_OUTPUT_DIR)
-    return pdf_path, out_dir
-
-
-def derive_output_filename(pdf_path: Path) -> str:
+def resolve_inputs(argv: list[str]) -> tuple[list[Path], Path]:
     """
-    Try to extract YYYY-MM-DD and a clean title from the PDF filename.
-    Falls back to today's date + stem.
-    """
-    stem = pdf_path.stem  # e.g. "Apr 2026 P&L vs 2025"
+    Returns (list_of_pdf_paths, output_dir).
 
-    # Look for a 4-digit year to anchor a date
-    year_match = re.search(r"(20\d{2})", stem)
+    Rules:
+    - If the last argument is an existing directory with no .pdf extension,
+      treat it as output_dir.
+    - Everything else is treated as input: a directory to scan, or explicit PDF files.
+    """
+    args = argv[1:]
+
+    if not args:
+        return _collect_pdfs(Path(DEFAULT_INPUT)), Path(DEFAULT_OUTPUT_DIR)
+
+    out_dir = Path(DEFAULT_OUTPUT_DIR)
+    input_args = args
+
+    if len(args) >= 2:
+        last = Path(args[-1])
+        if last.suffix.lower() != ".pdf" and (last.is_dir() or str(args[-1]).endswith(("/", "\\"))):
+            out_dir = last
+            input_args = args[:-1]
+
+    pdfs: list[Path] = []
+    for arg in input_args:
+        p = Path(arg)
+        if p.is_dir():
+            pdfs.extend(_collect_pdfs(p))
+        elif p.suffix.lower() == ".pdf":
+            pdfs.append(p)
+        else:
+            print(f"WARNING: Skipping '{arg}' - not a PDF or directory.")
+
+    return pdfs, out_dir
+
+
+def _collect_pdfs(directory: Path) -> list[Path]:
+    pdfs = sorted(directory.glob("*.pdf"))
+    if not pdfs:
+        print(f"WARNING: No PDFs found in {directory}")
+    return pdfs
+
+
+# ---------------------------------------------------------------------------
+# OUTPUT FILENAME
+# ---------------------------------------------------------------------------
+
+
+def derive_output_filename(pdf_paths: list[Path]) -> str:
+    parents = {p.parent for p in pdf_paths}
+    base = parents.pop().name if len(parents) == 1 else pdf_paths[0].stem
+
+    year_match = re.search(r"(20\d{2})", base)
     month_map = {
         "jan": "01", "feb": "02", "mar": "03", "apr": "04",
         "may": "05", "jun": "06", "jul": "07", "aug": "08",
@@ -108,82 +188,103 @@ def derive_output_filename(pdf_path: Path) -> str:
     }
     month_match = re.search(
         r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
-        stem, re.IGNORECASE
+        base, re.IGNORECASE,
     )
 
     if year_match and month_match:
-        year = year_match.group(1)
-        month = month_map[month_match.group(1).lower()]
-        date_str = f"{year}-{month}-01"
+        date_str = f"{year_match.group(1)}-{month_map[month_match.group(1).lower()]}-01"
     else:
         date_str = datetime.today().strftime("%Y-%m-%d")
 
-    # Sanitize stem for a filename
-    clean = re.sub(r'[<>:"/\\|?*]', "-", stem)
+    clean = re.sub(r'[<>:"/\\|?*]', "-", base)
     clean = re.sub(r"\s+", " ", clean).strip()
-
-    return f"{date_str} - {clean}.md"
-
-
-def upload_pdf(client: anthropic.Anthropic, pdf_path: Path) -> str:
-    print(f"Uploading {pdf_path.name} to Files API...")
-    with open(pdf_path, "rb") as f:
-        file_id = upload_pdf_fileobj(client, pdf_path.name, f)
-    print(f"  Uploaded. file_id={file_id}")
-    return file_id
+    return f"{date_str} - {clean} - Financial Summary.md"
 
 
-def upload_pdf_fileobj(client: anthropic.Anthropic, filename: str, fileobj: BinaryIO) -> str:
-    """Upload PDF content from an open binary stream and return the file_id."""
-    result = client.beta.files.upload(
-        file=(filename, fileobj, "application/pdf"),
-    )
-    return result.id
+# ---------------------------------------------------------------------------
+# FILES API
+# ---------------------------------------------------------------------------
 
 
-def build_user_message(filename: str, file_id: str) -> list:
-    return [
+def upload_pdfs(client: anthropic.Anthropic, pdf_paths: list[Path]) -> list[str]:
+    file_ids = []
+    for path in pdf_paths:
+        print(f"Uploading {path.name}...")
+        with open(path, "rb") as f:
+            result = client.beta.files.upload(
+                file=(path.name, f, "application/pdf"),
+            )
+        print(f"  file_id={result.id}")
+        file_ids.append(result.id)
+    return file_ids
+
+
+def cleanup_files(client: anthropic.Anthropic, file_ids: list[str]):
+    for fid in file_ids:
+        try:
+            client.beta.files.delete(fid)
+            print(f"Deleted {fid} from Files API.")
+        except Exception as e:
+            print(f"Warning: could not delete {fid}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# GENERATION
+# ---------------------------------------------------------------------------
+
+
+def build_user_message(pdf_paths: list[Path], file_ids: list[str]) -> list:
+    filenames = ", ".join(p.name for p in pdf_paths)
+    content: list[dict] = [
         {
             "type": "text",
             "text": (
-                f"Please summarize the attached financial report '{filename}'. "
-                "Follow the exact output structure specified in your instructions. "
-                "Use only the data present in the document."
+                f"The following {len(pdf_paths)} financial report(s) are attached: {filenames}. "
+                "Identify what each document contains (YTD P&L, current month P&L, "
+                "Balance Sheet, etc.) and produce a single unified summary following "
+                "the exact output structure in your instructions. "
+                "Use only data present in the documents."
             ),
-        },
-        {
-            "type": "document",
-            "source": {"type": "file", "file_id": file_id},
-        },
+        }
     ]
+    for fid in file_ids:
+        content.append({
+            "type": "document",
+            "source": {"type": "file", "file_id": fid},
+        })
+    return content
 
 
-def summarize_file_id(client: anthropic.Anthropic, filename: str, file_id: str) -> str:
-    """Generate the Markdown summary for an already-uploaded file (no console output)."""
+def generate_summary(
+    client: anthropic.Anthropic,
+    pdf_paths: list[Path],
+    file_ids: list[str],
+) -> str:
+    print(f"\nGenerating summary for {len(pdf_paths)} file(s) (streaming)...\n")
     chunks = []
     with client.beta.messages.stream(
         model="claude-opus-4-8",
-        max_tokens=4096,
+        max_tokens=8192,
         thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
-                "content": build_user_message(filename, file_id),
+                "content": build_user_message(pdf_paths, file_ids),
             }
         ],
         betas=["files-api-2025-04-14"],
     ) as stream:
         for text in stream.text_stream:
             chunks.append(text)
+
+    print()
     return "".join(chunks)
 
 
-def generate_summary(client: anthropic.Anthropic, pdf_path: Path, file_id: str) -> str:
-    print("Generating summary (streaming)...")
-    summary = summarize_file_id(client, pdf_path.name, file_id)
-    print(summary)
-    return summary
+# ---------------------------------------------------------------------------
+# SAVE
+# ---------------------------------------------------------------------------
 
 
 def save_output(content: str, out_dir: Path, filename: str) -> Path:
@@ -193,25 +294,23 @@ def save_output(content: str, out_dir: Path, filename: str) -> Path:
     return out_path
 
 
-def cleanup_file(client: anthropic.Anthropic, file_id: str):
-    try:
-        client.beta.files.delete(file_id)
-        print(f"Deleted uploaded file {file_id} from Files API.")
-    except Exception as e:
-        print(f"Warning: could not delete file {file_id}: {e}")
-
-
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 
 def main():
-    pdf_path, out_dir = resolve_paths(sys.argv)
+    pdf_paths, out_dir = resolve_inputs(sys.argv)
 
-    if not pdf_path.exists():
-        print(f"ERROR: PDF not found at {pdf_path}")
-        print("Check that the drive is mounted (e.g. /mnt/h) and the path is correct.")
+    if not pdf_paths:
+        print("ERROR: No PDF files found. Provide a directory or explicit file paths.")
+        sys.exit(1)
+
+    missing = [p for p in pdf_paths if not p.exists()]
+    if missing:
+        for p in missing:
+            print(f"ERROR: File not found: {p}")
+        print("Check that the drive is mounted (e.g. /mnt/h) and paths are correct.")
         sys.exit(1)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -219,18 +318,23 @@ def main():
         print("ERROR: ANTHROPIC_API_KEY environment variable not set.")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    print(f"Files to process ({len(pdf_paths)}):")
+    for p in pdf_paths:
+        print(f"  {p.name}")
+    print(f"Output directory: {out_dir}\n")
 
-    file_id = None
+    client = anthropic.Anthropic(api_key=api_key)
+    file_ids: list[str] = []
+
     try:
-        file_id = upload_pdf(client, pdf_path)
-        summary = generate_summary(client, pdf_path, file_id)
-        filename = derive_output_filename(pdf_path)
+        file_ids = upload_pdfs(client, pdf_paths)
+        summary = generate_summary(client, pdf_paths, file_ids)
+        filename = derive_output_filename(pdf_paths)
         out_path = save_output(summary, out_dir, filename)
         print(f"\nSummary saved to: {out_path}")
     finally:
-        if file_id:
-            cleanup_file(client, file_id)
+        if file_ids:
+            cleanup_files(client, file_ids)
 
 
 if __name__ == "__main__":
